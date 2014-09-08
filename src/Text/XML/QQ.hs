@@ -2,9 +2,9 @@
 
 
 -- | The XML quasiquoter.
---    
+--
 --    Given the variables
---    
+--
 --      >  url = "google.se"
 --      >  elem = "gmail"
 --      >  attrNs = "something"
@@ -13,9 +13,9 @@
 --      >  elemCont = CRef "testing"
 --      >  cont1 = Elem $ element { elName = qname "hej" }
 --      >  cont2 = CRef "other test"
---    
+--
 --    the code
---    
+--
 --      >   [$xmlQQ|
 --      >   <{url}:{elem} {attrNs}:{attrName}={attrValue} attr="cool">
 --      >     <elem ns1:elem1="1" ns2:elem2="2"><<elemCont>></elem>
@@ -25,9 +25,9 @@
 --      >     <<cont2>>
 --      >   </{url}:{elem}>
 --      >   |]
---    
+--
 --    will generate the data structure
---    
+--
 --      >   element {
 --      >     elName = QName elem Nothing (Just url),
 --      >     elAttribs = [Attr (QName attrName Nothing (Just attrNs)) attrValue,
@@ -52,6 +52,8 @@ import Language.Haskell.TH.Quote
 
 import Data.Data
 import Data.Maybe
+import Data.Monoid (Endo(..))
+import Data.Foldable (foldMap)
 
 -- import Data.Ratio
 import Text.ParserCombinators.Parsec
@@ -65,11 +67,11 @@ xmlQQ = QuasiQuoter xmlExp xmlPat xmlType xmlDec
   xmlType = undefined
   xmlDec = undefined
 
-  xmlExp :: String -> ExpQ
+  xmlExp :: String -> Q Exp
   xmlExp txt =
-    case parsed' of 
+    case parsed' of
       Left err -> error $ "Error in jsonExp: " ++ show err
-      Right val -> return $ elementToExp val
+      Right val -> elementToExp val
     where
       parsed' = parse xmlElementParser "txt" txt
 
@@ -78,51 +80,49 @@ xmlFileQQ = quoteFile xmlQQ
 
 -- Data types to Exp
 
-elementToExp :: ElementMeta -> Exp
+elementToExp :: ElementMeta -> Q Exp
 elementToExp (Element name attribs contents line) =
-  AppE (AppE (AppE (AppE (ConE nElement) name') attr') contents') (ConE nNothing)
-  where
-    name' = qnameToExp name
-    attr' = ListE $ map attrToExp attribs
-    contents' = ListE $ map contentToExp contents
+  [| XT.Element
+       $(qnameToExp name)
+       $(listE $ map attrToExp attribs)
+       $(appEndo (foldMap (Endo . contentToExp) contents) [| [] |])
+       Nothing
+   |]
 
-qnameToExp :: QNameMeta -> Exp
+qnameToExp :: QNameMeta -> Q Exp
 qnameToExp (QName name uri prefix) =
-  AppE (AppE (AppE (ConE nQName) name') (ConE nNothing)) prefix'
-  where
-    prefix' = maybe (ConE nNothing) (\p -> (AppE (ConE nJust) (stringmetaToExp p))) prefix
-    name' = stringmetaToExp name
+  [| XT.QName
+       $(stringmetaToExp name)
+       Nothing
+       $(maybe [| Nothing |]
+               (\p -> [| Just $(stringmetaToExp p) |])
+               prefix)
+   |]
 
-stringmetaToExp :: StringMeta -> Exp
-stringmetaToExp (StringMetaNormal s) = (LitE (StringL s))
-stringmetaToExp (StringMetaVar s) = VarE $ mkName s
+stringmetaToExp :: StringMeta -> Q Exp
+stringmetaToExp (StringMetaNormal s) = stringE s
+stringmetaToExp (StringMetaVar s) = varE $ mkName s
 
-attrToExp :: AttrMeta -> Exp
+attrToExp :: AttrMeta -> Q Exp
 attrToExp (Attr name val) =
-  AppE (AppE (ConE nAttr) name') val' -- (LitE (StringL val))
-  where
-    name' = qnameToExp name
-    val' = stringmetaToExp val
+  [| XT.Attr
+       $(qnameToExp name)
+       $(stringmetaToExp val)
+   |]
 
-contentToExp :: ContentMeta -> Exp
-contentToExp (Elem e) = AppE (ConE nElem) (elementToExp e)
-contentToExp (CRef s) = AppE (ConE nCRef) (LitE (StringL s))
-contentToExp (ContentVar v) = VarE $ mkName v
-contentToExp _ = error "Case Text in contentToExp is not implemented yet."
-
-nElem = mkName "Text.XML.Light.Types.Elem"
-nText = mkName "Text.XML.Light.Types.Text"
-nCRef = mkName "Text.XML.Light.Types.CRef"
-nElement = mkName "Text.XML.Light.Types.Element"
-nAttr = mkName "Text.XML.Light.Types.Attr"
-nQName = mkName "Text.XML.Light.Types.QName"
-nNothing = mkName "Data.Maybe.Nothing"
-nJust = mkName "Data.Maybe.Just"
-nList = mkName "[]"
+contentToExp :: ContentMeta -> Q Exp -> Q Exp
+contentToExp (Elem e) qe =
+  [| XT.Elem $(elementToExp e) : $(qe) |]
+contentToExp (CRef s) qe =
+  [| XT.CRef $(stringE s) : $(qe) |]
+contentToExp (ContentVar v) qe =
+  [| $(varE $ mkName v) : $(qe) |]
+contentToExp (ContentListVar v) qe =
+  [| $(varE $ mkName v) ++ $(qe) |]
+contentToExp _ _ = error "Case Text in contentToExp is not implemented yet."
 
 blank_meta_element :: ElementMeta
 blank_meta_element = Element (QName (StringMetaNormal "") Nothing Nothing) [] [] Nothing
-
 
 -- Data types
 
@@ -132,7 +132,7 @@ data AttrMeta =
     attrVal :: StringMeta
   }
 
-data ElementMeta = 
+data ElementMeta =
   Element {
     elName :: QNameMeta,
     elAttribs :: [AttrMeta],
@@ -140,8 +140,8 @@ data ElementMeta =
     elLine :: Maybe Line
   }
 
-data QNameMeta = 
-  QName	{ 
+data QNameMeta =
+  QName	{
     qName :: StringMeta,
     qURI :: Maybe String,
     qPrefix :: Maybe StringMeta
@@ -156,10 +156,11 @@ getStringMeta (StringMetaNormal n) = n
 getStringMeta (StringMetaVar n) = "{" ++ n ++ "}"
 
 data ContentMeta =
-  Elem ElementMeta 
+  Elem ElementMeta
   | Text CDataMeta
   | CRef String
   | ContentVar String
+  | ContentListVar String
 
 data CDataMeta =
   CData	{
@@ -167,7 +168,7 @@ data CDataMeta =
     cdData :: String,
     cdLine :: Maybe Line
   }
-  
+
 
 -- Parser
 
@@ -183,7 +184,7 @@ xmlElementParser = do
   contents <- closeTag <|> (openCloseTag name)
   spaces
   return $ Element name attrs contents Nothing
-  
+
 closeTag :: Parser [ContentMeta]
 closeTag = do
   string "/>"
@@ -198,7 +199,7 @@ openCloseTag (QName name Nothing ns) = do
   where
     name' = getStringMeta name
     ns' = maybe "" (\n -> (getStringMeta n) ++ ":") ns
- 
+
 attrParser :: Parser AttrMeta
 attrParser = do
   spaces
@@ -210,16 +211,19 @@ attrParser = do
 contentParser :: Parser ContentMeta
 contentParser = do
   spaces
-  content <- (try contentVarParser) <|> (try xmlElementParser >>= return . Elem) <|> (crefParser >>= return . CRef)
+  content <- (try contentVarParser) <|>
+             (try xmlElementParser >>= return . Elem) <|>
+             (crefParser >>= return . CRef)
   spaces
   return content
 
 contentVarParser :: Parser ContentMeta
 contentVarParser = do
   string "<<"
+  ctor <- (char '*' >> return ContentListVar) <|> return ContentVar
   s <- symbol
   string ">>"
-  return $ ContentVar s
+  return $ ctor s
 
 crefParser :: Parser String
 crefParser = many1 (noneOf "><")
@@ -255,7 +259,7 @@ metaSymbolParser :: Parser StringMeta
 metaSymbolParser = do
   metaNormalSymbolParser <|> metaVarSymbolParser
 
-metaNormalSymbolParser :: Parser StringMeta  
+metaNormalSymbolParser :: Parser StringMeta
 metaNormalSymbolParser = do
   s <- symbol
   return $ StringMetaNormal s
